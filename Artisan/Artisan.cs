@@ -18,9 +18,11 @@ using ECommons.Automation.LegacyTaskManager;
 using ECommons.DalamudServices;
 using ECommons.Logging;
 using OtterGui.Classes;
+
 using PunishLib;
 using System;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace Artisan;
 
@@ -70,6 +72,7 @@ public unsafe class Artisan : IDalamudPlugin
             "/artisan lists → Open Lists.\n" +
             "/artisan lists <ID> → Opens specific list by ID.\n" +
             "/artisan lists <ID> start → Starts specific list by ID.\n" +
+            "/artisan lists <ID> restock → Restocks specific list by ID.\n" +
             "/artisan macros → Open Macros.\n" +
             "/artisan macros <ID> → Opens specific macro by ID.\n" +
             "/artisan endurance → Open Endurance.\n" +
@@ -283,13 +286,31 @@ public unsafe class Artisan : IDalamudPlugin
                     {
                         if (P.Config.NewCraftingLists.Any(x => x.ID == id))
                         {
-                            if (subcommands.Length >= 3 && subcommands[2].ToLower() == "start")
+                            if (subcommands.Length >= 3)
                             {
-                                if (!Endurance.Enable)
+                                switch (subcommands[2].ToLower())
                                 {
-                                    CraftingListUI.selectedList = P.Config.NewCraftingLists.First(x => x.ID == id);
-                                    CraftingListUI.StartList();
-                                    return;
+                                    case "start":
+                                        if (!Endurance.Enable)
+                                        {
+                                            CraftingListUI.selectedList = P.Config.NewCraftingLists.First(x => x.ID == id);
+                                            CraftingListUI.StartList();
+                                            return;
+                                        }
+                                        break;
+                                    case "restock":
+                                        // 直接获取列表实例而不是依赖全局变量
+                                        var targetList = P.Config.NewCraftingLists.FirstOrDefault(x => x.ID == id);
+                                        if (targetList != null)
+                                        {
+                                            // 通过 Task 异步执行补货操作
+                                            Task.Run(() => RetainerInfo.RestockFromRetainers(targetList));
+                                        }
+                                        else
+                                        {
+                                            DuoLog.Error("Specified list ID not found.");
+                                        }
+                                        return;
                                 }
                             }
                             else
@@ -316,6 +337,7 @@ public unsafe class Artisan : IDalamudPlugin
                     return;
                 }
             }
+
 
             if (firstArg.ToLower() == "macros")
             {

@@ -81,33 +81,29 @@ namespace Artisan.CraftingLists
 
                 if (RetainerInfo.ATools)
                 {
-                    if (RetainerInfo.TM.IsBusy)
+                    bool isRestockInProgress = RetainerInfo.IsRestocking || RetainerInfo.TM.IsBusy;
+
+                    if (isRestockInProgress)
                     {
                         if (ImGui.Button("Abort Collecting From Retainer", new Vector2(ImGui.GetContentRegionAvail().X, 30)))
                         {
-                            RetainerInfo.TM.Abort();
+                            RetainerInfo.AbortRestock();
                         }
                     }
                     else
                     {
                         if (ImGui.Button("Restock Inventory From Retainers", new Vector2(ImGui.GetContentRegionAvail().X, 30)))
                         {
-                            Task.Run(() => RetainerInfo.RestockFromRetainers(selectedList));
+                            var currentList = P.Config.NewCraftingLists.FirstOrDefault(x => x.ID == selectedList.ID);
+                            if (currentList != null) {
+                                Task.Run(() => RetainerInfo.RestockFromRetainers(currentList));
+                            }
                         }
                     }
+
+                    if (Endurance.Enable || Processing)
+                        ImGui.EndDisabled();
                 }
-                else
-                {
-                    if (!RetainerInfo.AToolsInstalled)
-                        ImGuiEx.TextCentered(ImGuiColors.DalamudYellow, $"Please install Allagan Tools for retainer features.");
-
-                    if (RetainerInfo.AToolsInstalled && !RetainerInfo.AToolsEnabled)
-                        ImGuiEx.TextCentered(ImGuiColors.DalamudYellow, $"Please enable Allagan Tools for retainer features.");
-                }
-
-
-                if (Endurance.Enable || Processing)
-                    ImGui.EndDisabled();
             }
 
             if (ImGui.Button("Import List From Clipboard (Artisan Export)", new Vector2(ImGui.GetContentRegionAvail().X, 30)))

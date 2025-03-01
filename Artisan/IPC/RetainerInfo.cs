@@ -9,6 +9,7 @@ using ECommons;
 using ECommons.Automation.LegacyTaskManager;
 using ECommons.DalamudServices;
 using ECommons.ExcelServices.TerritoryEnumeration;
+using ECommons.Logging;
 using ECommons.Reflection;
 using ECommons.Throttlers;
 using ECommons.UIHelpers.AddonMasterImplementations;
@@ -18,6 +19,7 @@ using Lumina.Excel.Sheets;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,7 +38,9 @@ namespace Artisan.IPC
         private static ICallGateSubscriber<bool, bool>? _Initialized;
         private static ICallGateSubscriber<bool>? _IsInitialized;
         private static bool _InventoryChanged;
+        private static object _lock = new object();            // 线程安全锁
 
+        public static bool IsRestocking { get; set; }  // 标志位
         public static TaskManager TM = new TaskManager();
         internal static bool GenericThrottle => EzThrottler.Throttle("RetainerInfoThrottler", 100);
         internal static void RethrottleGeneric(int num) => EzThrottler.Throttle("RetainerInfoThrottler", num, true);
@@ -337,51 +341,84 @@ namespace Artisan.IPC
 
         public static void RestockFromRetainers(uint ItemId, int howManyToGet)
         {
-            if (RetainerData.SelectMany(x => x.Value).Any(x => x.Value.ItemId == ItemId && x.Value.Quantity > 0))
+            lock (_lock)  // 通过锁确保原子性
             {
-                TM.Enqueue(() => Svc.Framework.Update += Tick);
-                TM.Enqueue(() => AutoRetainerIPC.Suppress());
-                TM.EnqueueBell();
-                TM.DelayNext("BellInteracted", 200);
-
-                var retainerListSorted = RetainerData.Where(x => x.Value.Values.Any(y => y.ItemId == ItemId && y.HQQuantity > 0)).ToDictionary(x => x.Key, x => x.Value);
-                RetainerData.Where(x => x.Value.Values.Any(y => y.ItemId == ItemId && y.Quantity > 0)).ToList().ForEach(x => retainerListSorted.TryAdd(x.Key, x.Value));
-
-                foreach (var retainer in retainerListSorted)
+                if (IsRestocking)
                 {
-                    TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key), 5000, true, "SelectRetainer");
-                    TM.DelayNext("WaitToSelectEntrust", 200);
-                    TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
-                    TM.DelayNext("EntrustSelected", 200);
-                    TM.Enqueue(() =>
-                    {
-                        ExtractSingular(ItemId, howManyToGet, retainer.Key);
-                    }, "ExtractSingularEntry");
-
-                    TM.DelayNext("CloseRetainer", 200);
-                    TM.Enqueue(() => RetainerHandlers.CloseAgentRetainer());
-                    TM.DelayNext("ClickQuit", 200);
-                    TM.Enqueue(() => RetainerHandlers.SelectQuit());
-                    TM.Enqueue(() =>
-                    {
-                        if (CraftingListUI.NumberOfIngredient(ItemId) >= howManyToGet)
-                        {
-                            TM.DelayNextImmediate("CloseRetainerList", 200);
-                            TM.EnqueueImmediate(() => RetainerListHandlers.CloseRetainerList());
-                            TM.EnqueueImmediate(() => YesAlready.Unlock());
-                            TM.EnqueueImmediate(() => AutoRetainerIPC.Unsuppress());
-                            TM.EnqueueImmediate(() => Svc.Framework.Update -= Tick);
-                            TM.EnqueueImmediate(() => TM.Abort());
-                        }
-                    });
+                    DuoLog.Warning("Restock operation is already in progress.");
+                    return;
                 }
-
-                TM.DelayNext("CloseRetainerList", 200);
-                TM.Enqueue(() => RetainerListHandlers.CloseRetainerList());
-                TM.Enqueue(() => YesAlready.Unlock());
-                TM.Enqueue(() => AutoRetainerIPC.Unsuppress());
-                TM.Enqueue(() => Svc.Framework.Update -= Tick);
+                IsRestocking = true;  // 标记为运行中
             }
+
+            try
+            {
+                if (RetainerData.SelectMany(x => x.Value).Any(x => x.Value.ItemId == ItemId && x.Value.Quantity > 0))
+                {
+                    TM.Enqueue(() => Svc.Framework.Update += Tick);
+                    TM.Enqueue(() => AutoRetainerIPC.Suppress());
+                    TM.EnqueueBell();
+                    TM.DelayNext("BellInteracted", 200);
+
+                    var retainerListSorted = RetainerData.Where(x => x.Value.Values.Any(y => y.ItemId == ItemId && y.HQQuantity > 0)).ToDictionary(x => x.Key, x => x.Value);
+                    RetainerData.Where(x => x.Value.Values.Any(y => y.ItemId == ItemId && y.Quantity > 0)).ToList().ForEach(x => retainerListSorted.TryAdd(x.Key, x.Value));
+
+                    foreach (var retainer in retainerListSorted)
+                    {
+                        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key), 5000, true, "SelectRetainer");
+                        TM.DelayNext("WaitToSelectEntrust", 200);
+                        TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
+                        TM.DelayNext("EntrustSelected", 200);
+                        TM.Enqueue(() =>
+                        {
+                            ExtractSingular(ItemId, howManyToGet, retainer.Key);
+                        }, "ExtractSingularEntry");
+
+                        TM.DelayNext("CloseRetainer", 200);
+                        TM.Enqueue(() => RetainerHandlers.CloseAgentRetainer());
+                        TM.DelayNext("ClickQuit", 200);
+                        TM.Enqueue(() => RetainerHandlers.SelectQuit());
+                        TM.Enqueue(() =>
+                        {
+                            if (CraftingListUI.NumberOfIngredient(ItemId) >= howManyToGet)
+                            {
+                                TM.DelayNextImmediate("CloseRetainerList", 200);
+                                TM.EnqueueImmediate(() => RetainerListHandlers.CloseRetainerList());
+                                TM.EnqueueImmediate(() => YesAlready.Unlock());
+                                TM.EnqueueImmediate(() => AutoRetainerIPC.Unsuppress());
+                                TM.EnqueueImmediate(() => Svc.Framework.Update -= Tick);
+                                TM.EnqueueImmediate(() => TM.Abort());
+                            }
+                        });
+                    }
+
+                    TM.DelayNext("CloseRetainerList", 200);
+                    TM.Enqueue(() => RetainerListHandlers.CloseRetainerList());
+                    TM.Enqueue(() => YesAlready.Unlock());
+                    TM.Enqueue(() => AutoRetainerIPC.Unsuppress());
+                    TM.Enqueue(() => Svc.Framework.Update -= Tick);
+                }
+            }
+            catch (Exception ex)
+            {
+                DuoLog.Error($"Restock failed: {ex.Message}");
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    IsRestocking = false;  // 标记为未运行
+                }
+            }
+        }
+
+        public static void AbortRestock()
+        {
+            lock (_lock)
+            {
+                IsRestocking = false;
+            }
+            TM.Abort();
         }
 
         public static bool ExtractSingular(uint ItemId, int howManyToGet, ulong retainerKey)
@@ -429,70 +466,94 @@ namespace Artisan.IPC
 
         public static void RestockFromRetainers(NewCraftingList list)
         {
-            if (GetReachableRetainerBell() == null) return;
-
-            Dictionary<int, int> requiredItems = new();
-            Dictionary<uint, int> materialList = new();
-
-            Svc.Log.Debug($"Making material list");
-
-            materialList = list.ListMaterials();
-
-            Svc.Log.Debug($"Creating Fetch List");
-
-            foreach (var material in materialList.OrderByDescending(x => x.Key))
+            lock (_lock)  // 通过锁确保原子性
             {
-                Svc.Log.Debug($"{material}");
-                var invCount = CraftingListUI.NumberOfIngredient(material.Key);
-                if (invCount < material.Value)
+                if (IsRestocking)
                 {
-                    var diffcheck = material.Value - invCount;
-                    Svc.Log.Debug($"{material.Key} {diffcheck}");
-                    requiredItems.Add((int)material.Key, diffcheck);
+                    DuoLog.Warning("Restock operation is already in progress.");
+                    return;
                 }
-
-                //Refresh retainer cache if empty
-                GetRetainerItemCount(material.Key);
+                IsRestocking = true;  // 标记为运行中
             }
 
-            if (RetainerData.SelectMany(x => x.Value).Any(x => requiredItems.Any(y => y.Key == x.Value.ItemId)))
+            try
             {
-                Svc.Log.Debug($"Processing Retainer Data");
-                TM.Enqueue(() => Svc.Framework.Update += Tick);
-                TM.Enqueue(() => AutoRetainerIPC.Suppress());
-                TM.EnqueueBell();
-                TM.DelayNext("BellInteracted", 200);
+                if (GetReachableRetainerBell() == null) return;
 
-                foreach (var retainer in RetainerData)
+                Dictionary<int, int> requiredItems = new();
+                Dictionary<uint, int> materialList = new();
+
+                Svc.Log.Debug($"Making material list");
+
+                materialList = list.ListMaterials();
+
+                Svc.Log.Debug($"Creating Fetch List");
+
+                foreach (var material in materialList.OrderByDescending(x => x.Key))
                 {
-                    if (retainer.Value.Values.Any(x => requiredItems.Any(y => y.Value > 0 && y.Key == x.ItemId && x.Quantity > 0)))
+                    Svc.Log.Debug($"{material}");
+                    var invCount = CraftingListUI.NumberOfIngredient(material.Key);
+                    if (invCount < material.Value)
                     {
-                        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key));
-                        TM.DelayNext("WaitToSelectEntrust", 200);
-                        TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
-                        TM.DelayNext("EntrustSelected", 200);
-                        foreach (var item in requiredItems)
-                        {
-                            if (retainer.Value.Values.Any(x => x.ItemId == item.Key && x.Quantity > 0))
-                            {
-                                TM.DelayNext("SwitchItems", 200);
-                                TM.Enqueue(() =>
-                                {
-                                    ExtractItem(requiredItems, item, retainer.Key);
-                                });
-                            }
-                        }
-                        TM.DelayNext("CloseRetainer", 200);
-                        TM.Enqueue(() => RetainerHandlers.CloseAgentRetainer());
-                        TM.DelayNext("ClickQuit", 200);
-                        TM.Enqueue(() => RetainerHandlers.SelectQuit());
+                        var diffcheck = material.Value - invCount;
+                        Svc.Log.Debug($"{material.Key} {diffcheck}");
+                        requiredItems.Add((int)material.Key, diffcheck);
                     }
+
+                    //Refresh retainer cache if empty
+                    GetRetainerItemCount(material.Key);
                 }
-                TM.DelayNext("CloseRetainerList", 200);
-                TM.Enqueue(() => RetainerListHandlers.CloseRetainerList());
-                TM.Enqueue(() => YesAlready.Unlock());
-                TM.Enqueue(() => AutoRetainerIPC.Unsuppress());
-                TM.Enqueue(() => Svc.Framework.Update -= Tick);
+
+                if (RetainerData.SelectMany(x => x.Value).Any(x => requiredItems.Any(y => y.Key == x.Value.ItemId)))
+                {
+                    Svc.Log.Debug($"Processing Retainer Data");
+                    TM.Enqueue(() => Svc.Framework.Update += Tick);
+                    TM.Enqueue(() => AutoRetainerIPC.Suppress());
+                    TM.EnqueueBell();
+                    TM.DelayNext("BellInteracted", 200);
+
+                    foreach (var retainer in RetainerData)
+                    {
+                        if (retainer.Value.Values.Any(x => requiredItems.Any(y => y.Value > 0 && y.Key == x.ItemId && x.Quantity > 0)))
+                        {
+                            TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key));
+                            TM.DelayNext("WaitToSelectEntrust", 200);
+                            TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
+                            TM.DelayNext("EntrustSelected", 200);
+                            foreach (var item in requiredItems)
+                            {
+                                if (retainer.Value.Values.Any(x => x.ItemId == item.Key && x.Quantity > 0))
+                                {
+                                    TM.DelayNext("SwitchItems", 200);
+                                    TM.Enqueue(() =>
+                                    {
+                                        ExtractItem(requiredItems, item, retainer.Key);
+                                    });
+                                }
+                            }
+                            TM.DelayNext("CloseRetainer", 200);
+                            TM.Enqueue(() => RetainerHandlers.CloseAgentRetainer());
+                            TM.DelayNext("ClickQuit", 200);
+                            TM.Enqueue(() => RetainerHandlers.SelectQuit());
+                        }
+                    }
+                    TM.DelayNext("CloseRetainerList", 200);
+                    TM.Enqueue(() => RetainerListHandlers.CloseRetainerList());
+                    TM.Enqueue(() => YesAlready.Unlock());
+                    TM.Enqueue(() => AutoRetainerIPC.Unsuppress());
+                    TM.Enqueue(() => Svc.Framework.Update -= Tick);
+                }
+            }
+            catch (Exception ex)
+            {
+                DuoLog.Error($"Restock failed: {ex.Message}");
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    IsRestocking = false;  // 标记为未运行
+                }
             }
         }
 
