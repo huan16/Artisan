@@ -54,6 +54,9 @@ namespace Artisan.CraftingLists
 
         public string? Name { get; set; }
 
+        // 缓存每个物品的总需求数量
+        public readonly Dictionary<uint, int> ResultItemCache = new();
+
         public List<ListItem> Recipes { get; set; } = new();
 
         public List<uint> ExpandedList { get; set; } = new();
@@ -145,10 +148,7 @@ namespace Artisan.CraftingLists
             {
                 foreach (var item in list.Recipes)
                 {
-                    if (item.ListItemOptions == null)
-                    {
-                        item.ListItemOptions = new ListItemOptions();
-                    }
+                    item.ListItemOptions ??= new ListItemOptions();
                     item.ListItemOptions.NQOnly = true;
                 }
             }
@@ -158,30 +158,38 @@ namespace Artisan.CraftingLists
             return true;
         }
 
+        /// <summary>
+        /// 检测配方窗口是否已打开且有效
+        /// </summary>
         public static unsafe bool RecipeWindowOpen()
         {
-            return TryGetAddonByName<AddonRecipeNote>("RecipeNote", out var addon) && addon->AtkUnitBase.IsVisible && Operations.GetSelectedRecipeEntry() != null;
+            return TryGetAddonByName<AddonRecipeNote>("RecipeNote", out var addon) 
+                && addon->AtkUnitBase.IsVisible 
+                && Operations.GetSelectedRecipeEntry() != null;
         }
 
+        /// <summary>
+        /// 通过ID打开指定配方（包含状态检查与防抖机制）
+        /// </summary>
+        /// <param name="skipThrottle">是否跳过操作间隔限制</param>
         public static unsafe void OpenRecipeByID(uint recipeID, bool skipThrottle = false)
         {
             if (Crafting.CurState != Crafting.State.IdleNormal) return;
+            
+            var currentRecipe = Operations.GetSelectedRecipeEntry();
+            if (currentRecipe != null && currentRecipe->RecipeId == recipeID) return;
 
-            var re = Operations.GetSelectedRecipeEntry();
-
-            if (!TryGetAddonByName<AddonRecipeNote>("RecipeNote", out var addon) || (re != null && re->RecipeId != recipeID))
-            {
-                AgentRecipeNote.Instance()->OpenRecipeByRecipeId(recipeID);
-            }
+            AgentRecipeNote.Instance()->OpenRecipeByRecipeId(recipeID);
         }
 
-        public static bool HasItemsForRecipe(uint currentProcessedItem)
+        /// <summary>
+        /// 验证是否拥有配方所需全部材料
+        /// </summary>
+        public static bool HasItemsForRecipe(uint recipeId)
         {
-            if (currentProcessedItem == 0) return false;
-            var recipe = LuminaSheets.RecipeSheet[currentProcessedItem];
-            if (recipe.RowId == 0) return false;
-
-            return CraftingListUI.CheckForIngredients(recipe, false);
+            if (recipeId == 0) return false;
+            var recipe = LuminaSheets.RecipeSheet[recipeId];
+            return recipe.RowId != 0 && CraftingListUI.CheckForIngredients(recipe, false);
         }
 
         internal static unsafe void ProcessList(NewCraftingList selectedList)
@@ -394,7 +402,7 @@ namespace Artisan.CraftingLists
                     {
                         var lastIndex = selectedList.ExpandedList.LastIndexOf(CraftingListUI.CurrentProcessedItem);
                         var count = lastIndex - CurrentIndex + 1;
-                        count = CheckWhatExpected(selectedList, recipe, count);
+                        count = GetRecipeExpectedCraftNumber(selectedList, recipe, count);
                         if (count >= 99)
                         {
                             CLTM.Enqueue(() => Operations.QuickSynthItem(99));
@@ -418,37 +426,79 @@ namespace Artisan.CraftingLists
 
                     }
                 }
-
             }
         }
 
-        private static int CheckWhatExpected(NewCraftingList selectedList, Recipe recipe, int count)
+        /// <summary>
+        /// 计算需要制作的物品数量，考虑跳过足够物品的情况
+        /// </summary>
+        private static int GetRecipeExpectedCraftNumber(NewCraftingList selectedList, Recipe recipe, int initialCount)
         {
-            if (selectedList.SkipIfEnough)
+            if (!selectedList.SkipIfEnough) return initialCount;
+
+            // 预计算关键数据
+            var resultItemId = recipe.ItemResult.RowId;
+            var resultPerCraft = recipe.AmountResult;
+            var inventoryCount = CraftingListUI.NumberOfIngredient(resultItemId);
+
+            // 计算总需求数量
+            var totalRequired = CalculateTotalRequired(selectedList, resultItemId, resultPerCraft);
+
+            // 计算实际需要制作的数量
+            var actualToCraft = CalculateActualCraftCount(selectedList, recipe, inventoryCount, totalRequired);
+
+            // 计算最终制作次数（考虑每次制作产出数量）
+            return CalculateFinalCraftCount(actualToCraft, resultPerCraft);
+        }
+
+        /// <summary>
+        /// 计算该物品在清单中的总需求数量
+        /// </summary>
+        private static int CalculateTotalRequired(NewCraftingList list, uint itemId, int resultPerCraft)
+        {
+            // 使用字典缓存计算结果
+            if (!list.ResultItemCache.TryGetValue(itemId, out var total))
             {
-                var inventoryitems = CraftingListUI.NumberOfIngredient(recipe.ItemResult.Value.RowId);
-                var expectedNumber = 0;
-                var stillToCraft = 0;
-                var totalToCraft = selectedList.ExpandedList.Count(x => LuminaSheets.RecipeSheet[x].ItemResult.Value.Name.ToDalamudString().ToString() == recipe.ItemResult.Value.Name.ToDalamudString().ToString()) * recipe.AmountResult;
-                if (Materials!.Count(x => x.Key == recipe.ItemResult.RowId) == 0 || selectedList.SkipLiteral)
-                {
-                    // var previousCrafted = selectedList.Items.Count(x => LuminaSheets.RecipeSheet[x].ItemResult.Value.Name.ToDalamudString().ToString() == recipe.ItemResult.Value.Name.ToDalamudString().ToString() && selectedList.Items.IndexOf(x) < CurrentIndex) * recipe.AmountResult;
-                    stillToCraft = selectedList.ExpandedList.Count(x => LuminaSheets.RecipeSheet[x].ItemResult.RowId == recipe.ItemResult.RowId && selectedList.ExpandedList.IndexOf(x) >= CurrentIndex) * recipe.AmountResult - inventoryitems;
-                    expectedNumber = stillToCraft > 0 ? Math.Min(selectedList.ExpandedList.Count(x => x == CraftingListUI.CurrentProcessedItem) * recipe.AmountResult, stillToCraft) : selectedList.ExpandedList.Count(x => x == CraftingListUI.CurrentProcessedItem);
-                }
-                else
-                {
-                    expectedNumber = Materials!.First(x => x.Key == recipe.ItemResult.RowId).Value;
-                }
+                total = list.ExpandedList
+                    .Where(recipeId => LuminaSheets.RecipeSheet[recipeId].ItemResult.RowId == itemId)
+                    .Sum(_ => resultPerCraft);
 
-                var difference = Math.Min(totalToCraft - inventoryitems, expectedNumber);
-                Svc.Log.Debug($"{recipe.ItemResult.Value.Name.ToDalamudString()} {expectedNumber} {difference}");
-                double numberToCraft = Math.Ceiling((double)difference / recipe.AmountResult);
+                list.ResultItemCache[itemId] = total;
+            }
+            return total;
+        }
 
-                count = (int)numberToCraft;
+        /// <summary>
+        /// 计算实际需要制作的数量（考虑库存和跳过逻辑）
+        /// </summary>
+        private static int CalculateActualCraftCount(NewCraftingList list, Recipe recipe, int inventoryCount, int totalRequired)
+        {
+            var resultItemId = recipe.ItemResult.RowId;
+            var shouldUseMaterialLogic = !list.SkipLiteral && Materials!.Any(x => x.Key == resultItemId);
+
+            if (shouldUseMaterialLogic)
+            {
+                return Materials!.First(x => x.Key == resultItemId).Value;
             }
 
-            return count;
+            // 计算剩余需要制作的数量（当前索引之后的部分）
+            var remainingCrafts = list.ExpandedList
+                .Where((recipeId, index) =>
+                    index >= CurrentIndex &&
+                    LuminaSheets.RecipeSheet[recipeId].ItemResult.RowId == resultItemId)
+                .Sum(_ => recipe.AmountResult);
+
+            var deficit = Math.Max(totalRequired - inventoryCount, 0);
+            return Math.Min(remainingCrafts, deficit);
+        }
+
+        /// <summary>
+        /// 计算最终需要执行制作的次数
+        /// </summary>
+        private static int CalculateFinalCraftCount(int requiredItems, int resultPerCraft)
+        {
+            var (quotient, remainder) = Math.DivRem(requiredItems, resultPerCraft);
+            return quotient + (remainder > 0 ? 1 : 0);
         }
 
         public static unsafe bool SetIngredients(EnduranceIngredients[]? setIngredients = null)
