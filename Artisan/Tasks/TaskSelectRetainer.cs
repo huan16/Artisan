@@ -21,6 +21,8 @@ using System.Runtime.InteropServices;
 using static ECommons.GenericHelpers;
 using MemoryHelper = Dalamud.Memory.MemoryHelper;
 using ECommons.Automation.UIInput;
+using FFXIVClientStructs.STD;
+using FFXIVClientStructs;
 
 
 namespace Artisan.Tasks;
@@ -29,24 +31,32 @@ internal static class TaskSelectRetainer
 {
     internal static void EnqueueRetainer(this TaskManager TM, ulong id)
     {
-        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(id));
+        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(TM, id));
         TM.Enqueue(() => RetainerListHandlers.TryGetCurrentRetainer(out _));
     }
 }
 
 internal unsafe static class RetainerListHandlers
 {
-    internal static bool? SelectRetainerByID(ulong id)
+    internal static bool? SelectRetainerByID(this TaskManager TM, ulong id)
     {
+        var retainerManager = FFXIVClientStructs.FFXIV.Client.Game.RetainerManager.Instance();
+        if (retainerManager->Ready != 1)
+        {
+            TM.DelayNextImmediate(100);
+            TM.EnqueueImmediate(() => SelectRetainerByID(TM, id));
+            return true;
+        }
+
         string retainerName = "";
         for (uint i = 0; i < 10; i++)
         {
-            var retainer = FFXIVClientStructs.FFXIV.Client.Game.RetainerManager.Instance()->GetRetainerBySortedIndex(i);
+            var retainer = retainerManager->GetRetainerBySortedIndex(i);
             if (retainer == null) continue;
 
+            Svc.Log.Debug($"Retainer {i} in retainerManager is {retainer->NameString}");
             if (retainer->RetainerId == id)
                 retainerName = retainer->NameString;
-
         }
 
         return SelectRetainerByName(retainerName);

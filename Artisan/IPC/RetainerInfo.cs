@@ -365,7 +365,7 @@ namespace Artisan.IPC
 
                     foreach (var retainer in retainerListSorted)
                     {
-                        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key), 5000, true, "SelectRetainer");
+                        TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(TM, retainer.Key), 5000, true, "SelectRetainer");
                         TM.DelayNext("WaitToSelectEntrust", 200);
                         TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
                         TM.DelayNext("EntrustSelected", 200);
@@ -516,7 +516,7 @@ namespace Artisan.IPC
                     {
                         if (retainer.Value.Values.Any(x => requiredItems.Any(y => y.Value > 0 && y.Key == x.ItemId && x.Quantity > 0)))
                         {
-                            TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(retainer.Key));
+                            TM.Enqueue(() => RetainerListHandlers.SelectRetainerByID(TM, retainer.Key));
                             TM.DelayNext("WaitToSelectEntrust", 200);
                             TM.Enqueue(() => RetainerHandlers.SelectEntrustItems());
                             TM.DelayNext("EntrustSelected", 200);
