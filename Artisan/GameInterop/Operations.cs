@@ -31,6 +31,9 @@ public static unsafe class Operations
 
     public unsafe static void QuickSynthItem(int crafts)
     {
+        if (crafts <= 0)
+            return;
+            
         if (Crafting.CurState is not Crafting.State.IdleBetween and not Crafting.State.IdleNormal)
             return;
 
